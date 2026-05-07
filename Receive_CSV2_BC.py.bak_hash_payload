@@ -1,0 +1,266 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+import csv
+import json
+import os
+import re
+import subprocess
+import time
+from datetime import datetime
+from pathlib import Path
+
+import serial
+
+
+PORT = os.environ.get("SERIAL_PORT", "/dev/ttyACM0")
+BAUDRATE = int(os.environ.get("BAUDRATE", "115200"))
+
+CSV_FILE = os.environ.get("CSV_FILE", "lora_log_bc.csv")
+
+NODE_ID = os.environ.get("NODE_ID", "yamalog-7-receiver")
+
+KEY_NAME = os.environ.get("KEY_NAME", "testwallet")
+CHAIN_ID = os.environ.get("CHAIN_ID", "injective-888")
+NODE = os.environ.get("NODE", "https://injective-testnet-rpc.publicnode.com:443")
+GAS_PRICES = os.environ.get("GAS_PRICES", "500000000inj")
+GAS = os.environ.get("GAS", "500000")
+CONTRACT_ADDR = os.environ.get("CONTRACT_ADDR", "inj1zrg7tv5phxmu8unjhhhnzvtus30dpluaqkeln5")
+
+BROADCAST_MODE = os.environ.get("BROADCAST_MODE", "sync")
+KEYRING_BACKEND = os.environ.get("KEYRING_BACKEND", "test")
+
+SEND_INTERVAL_SEC = float(os.environ.get("SEND_INTERVAL_SEC", "1.0"))
+
+
+def parse_lora_line(line: str) -> dict:
+    """
+    受信例:
+      FFCC{"qr_id":"1a"}
+      FFCB{"qr_id":"1c"}
+
+    先頭の JSON より前の文字列を status とし，
+    JSON 内の qr_id を抽出する。
+    """
+    raw = line.strip()
+
+    m = re.search(r"(\{.*\})", raw)
+
+    status = ""
+    json_part = ""
+    qr_id = ""
+
+    if m:
+        status = raw[:m.start()].strip()
+        json_part = m.group(1)
+
+        try:
+            obj = json.loads(json_part)
+            qr_id = str(obj.get("qr_id", ""))
+        except json.JSONDecodeError:
+            qr_id = ""
+    else:
+        status = raw[:4].strip() if len(raw) >= 4 else raw
+        json_part = ""
+
+    return {
+        "raw": raw,
+        "status": status,
+        "json_part": json_part,
+        "qr_id": qr_id,
+    }
+
+
+def send_to_contract(parsed: dict) -> dict:
+    """
+    既存の inj_text_store コントラクト用に，
+    ExecuteMsg::Store { text } 形式で送信する。
+
+    送信されるメッセージ例:
+      {
+        "store": {
+          "text": "{\"node_id\":\"...\",\"qr_id\":\"...\"}"
+        }
+      }
+    """
+    if not CONTRACT_ADDR:
+        return {
+            "ok": False,
+            "txhash": "",
+            "error": "CONTRACT_ADDR is empty",
+            "stdout": "",
+            "stderr": "",
+        }
+
+    payload = {
+        "node_id": NODE_ID,
+        "qr_id": parsed.get("qr_id", ""),
+        "raw": parsed.get("raw", ""),
+        "status": parsed.get("status", ""),
+        "local_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+
+    msg = {
+        "store": {
+            "text": json.dumps(payload, ensure_ascii=False)
+        }
+    }
+
+    cmd = [
+        "injectived",
+        "tx",
+        "wasm",
+        "execute",
+        CONTRACT_ADDR,
+        json.dumps(msg, ensure_ascii=False),
+        "--from",
+        KEY_NAME,
+        "--keyring-backend",
+        KEYRING_BACKEND,
+        "--chain-id",
+        CHAIN_ID,
+        "--node",
+        NODE,
+        "--gas-prices",
+        GAS_PRICES,
+        "--gas",
+        GAS,
+        "--broadcast-mode",
+        BROADCAST_MODE,
+        "-y",
+        "--output",
+        "json",
+    ]
+
+    try:
+        proc = subprocess.run(
+            cmd,
+            text=True,
+            capture_output=True,
+            timeout=90,
+        )
+
+        txhash = ""
+        error = ""
+
+        stdout = proc.stdout.strip()
+        stderr = proc.stderr.strip()
+
+        if stdout:
+            try:
+                out = json.loads(stdout)
+                txhash = out.get("txhash", "")
+                code = out.get("code", 0)
+                raw_log = out.get("raw_log", "")
+
+                if code not in (0, "0", None):
+                    error = f"tx code={code}, raw_log={raw_log}"
+            except json.JSONDecodeError:
+                error = "stdout is not JSON"
+
+        if proc.returncode != 0:
+            error = stderr or error or f"returncode={proc.returncode}"
+
+        return {
+            "ok": proc.returncode == 0 and error == "",
+            "txhash": txhash,
+            "error": error,
+            "stdout": stdout,
+            "stderr": stderr,
+        }
+
+    except subprocess.TimeoutExpired:
+        return {
+            "ok": False,
+            "txhash": "",
+            "error": "timeout",
+            "stdout": "",
+            "stderr": "",
+        }
+    except Exception as e:
+        return {
+            "ok": False,
+            "txhash": "",
+            "error": str(e),
+            "stdout": "",
+            "stderr": "",
+        }
+
+
+def ensure_csv_header(path: Path) -> None:
+    if not path.exists() or path.stat().st_size == 0:
+        with path.open("w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                "time",
+                "raw",
+                "status",
+                "json_part",
+                "qr_id",
+                "bc_ok",
+                "txhash",
+                "bc_error",
+            ])
+
+
+def main() -> None:
+    csv_path = Path(CSV_FILE)
+    ensure_csv_header(csv_path)
+
+    print("Logging start... Ctrl+Cで停止")
+    print(f"PORT={PORT}")
+    print(f"BAUDRATE={BAUDRATE}")
+    print(f"CSV_FILE={CSV_FILE}")
+    print(f"NODE_ID={NODE_ID}")
+    print(f"CHAIN_ID={CHAIN_ID}")
+    print(f"NODE={NODE}")
+    print(f"CONTRACT_ADDR={CONTRACT_ADDR}")
+
+    with serial.Serial(PORT, BAUDRATE, timeout=1) as ser, csv_path.open(
+        "a", newline="", encoding="utf-8"
+    ) as f:
+        writer = csv.writer(f)
+
+        try:
+            while True:
+                line = ser.readline().decode("utf-8", errors="ignore").strip()
+
+                if not line:
+                    continue
+
+                now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                parsed = parse_lora_line(line)
+
+                result = send_to_contract(parsed)
+
+                writer.writerow([
+                    now,
+                    parsed["raw"],
+                    parsed["status"],
+                    parsed["json_part"],
+                    parsed["qr_id"],
+                    result["ok"],
+                    result["txhash"],
+                    result["error"],
+                ])
+                f.flush()
+
+                if result["ok"]:
+                    print(
+                        f'{now} status={parsed["status"]} '
+                        f'qr_id={parsed["qr_id"]} txhash={result["txhash"]}'
+                    )
+                else:
+                    print(
+                        f'{now} status={parsed["status"]} '
+                        f'qr_id={parsed["qr_id"]} BC_SEND_FAILED={result["error"]}'
+                    )
+
+                time.sleep(SEND_INTERVAL_SEC)
+
+        except KeyboardInterrupt:
+            print("\n停止しました")
+
+
+if __name__ == "__main__":
+    main()
