@@ -6,6 +6,12 @@ ENV_FILE="$BASE_DIR/.env"
 
 mkdir -p "$BASE_DIR"
 
+if [ -f "$ENV_FILE" ]; then
+  echo "[WARN] .env already exists: $ENV_FILE"
+  echo "[WARN] Backup will be created: $ENV_FILE.bak.$(date '+%Y%m%d_%H%M%S')"
+  cp "$ENV_FILE" "$ENV_FILE.bak.$(date '+%Y%m%d_%H%M%S')"
+fi
+
 cat > "$ENV_FILE" <<'ENVEOF'
 # ============================================================
 # LoRa Receiver Settings
@@ -17,8 +23,8 @@ export CSV_FILE=lora_log_bc.csv
 # ============================================================
 # Node / Payload Settings
 # ============================================================
-export NODE_ID=yamalog-13-receiver
-export PAYLOAD_NODE_ID=node-pi-to-lora1
+export NODE_ID=yamalog-receiver
+export PAYLOAD_NODE_ID=node-pi-to-lora2
 export PAYLOAD_NAME="yama log e-paper"
 export PAYLOAD_DESCRIPTION="yama log QRe-paper"
 
@@ -54,32 +60,17 @@ export KEYRING_BACKEND=test
 export PATH="$HOME/bin:$PATH"
 ENVEOF
 
-echo "[OK] .env created: $ENV_FILE"
-
-# ~/.bashrc に PATH 設定を恒久追加
-if ! grep -q 'export PATH="$HOME/bin:$PATH"' "$HOME/.bashrc"; then
-  echo 'export PATH="$HOME/bin:$PATH"' >> "$HOME/.bashrc"
-  echo "[OK] PATH added to ~/.bashrc"
-else
-  echo "[INFO] PATH already exists in ~/.bashrc"
-fi
-
+echo "============================================================"
+echo "[OK] .env created"
+echo "============================================================"
+echo "$ENV_FILE"
 echo
-echo "============================================================"
-echo "Environment file content"
-echo "============================================================"
-cat "$ENV_FILE"
-
+echo "Edit it before running setup_injectived_env.sh:"
 echo
-echo "============================================================"
-echo "Next commands"
-echo "============================================================"
-echo "cd $BASE_DIR"
-echo "source .env"
-echo "which injectived"
-echo "injectived version"
+echo "nano $ENV_FILE"
 echo
-echo "Wallet address check:"
-echo 'ADDR=$(injectived keys show "$KEY_NAME" -a --keyring-backend test)'
-echo 'echo "$ADDR"'
-echo 'injectived query bank balances "$ADDR" --node "$NODE"'
+echo "Example values to edit:"
+echo "  PAYLOAD_NODE_ID=node-pi-to-lora1"
+echo "  PAYLOAD_NODE_ID=node-pi-to-lora2"
+echo "  NODE_ID=yamalog-8-receiver"
+echo "  NODE_ID=yamalog-13-receiver"
